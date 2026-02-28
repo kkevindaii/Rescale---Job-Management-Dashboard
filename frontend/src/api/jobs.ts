@@ -31,14 +31,16 @@ async function handleResponse<T>(res: Response): Promise<T> {
 }
 
 /**
- * GET /api/jobs/?page=N — fetch one page of jobs.
- * Called by useInfiniteQuery, which passes { pageParam } on each invocation.
- * pageParam starts at 1 (set via initialPageParam in JobList).
+ * GET /api/jobs/?page=N&sort=newest&status=RUNNING
+ * Called by useInfiniteQuery. filter/sort are passed from JobList component state
+ * so the backend handles filtering and ordering rather than the frontend.
  */
 export async function fetchJobs(
-  { pageParam }: { pageParam: number }
+  { pageParam, filter, sort }: { pageParam: number; filter: string; sort: string }
 ): Promise<PaginatedResponse<Job>> {
-  const res = await fetch(`${BASE}/jobs/?page=${pageParam}`)
+  const params = new URLSearchParams({ page: String(pageParam), sort })
+  if (filter !== 'ALL') params.set('status', filter)
+  const res = await fetch(`${BASE}/jobs/?${params}`)
   return handleResponse<PaginatedResponse<Job>>(res)
 }
 

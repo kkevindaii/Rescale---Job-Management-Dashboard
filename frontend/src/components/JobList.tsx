@@ -27,23 +27,20 @@ export default function JobList() {
     isError,
     error,
   } = useInfiniteQuery({
-    queryKey: ['jobs'],
-    queryFn: fetchJobs,
-    // Start at page 1 — TanStack Query passes this as pageParam on first fetch
+    // filter and sort are part of the key — changing either resets to page 1
+    // and triggers a fresh fetch with the new params
+    queryKey: ['jobs', filter, sort],
+    queryFn: ({ pageParam }) => fetchJobs({ pageParam, filter, sort }),
     initialPageParam: 1,
-    // Called after each page loads to determine the next pageParam.
-    // Extracts the page number from DRF's 'next' URL so we never hardcode
-    // host/port in the frontend (the full URL points to the backend container).
-    // Returns undefined when 'next' is null, which sets hasNextPage to false.
     getNextPageParam: (lastPage) => {
       if (!lastPage.next) return undefined
       return Number(new URL(lastPage.next).searchParams.get('page'))
     },
   })
 
-  // Flatten all loaded pages into a single array for filtering and rendering
+  // Flatten pages — results are already filtered and sorted by the backend
   const jobs = data?.pages.flatMap((page) => page.results) ?? []
-  // Total count comes from the first page — DRF always returns the full count
+  // count reflects the total matching the current filter (not total jobs in DB)
   const totalCount = data?.pages[0]?.count ?? 0
 
   if (isLoading) {
@@ -62,28 +59,6 @@ export default function JobList() {
     )
   }
 
-  if (!jobs?.length) {
-    return (
-      <div className="text-center py-12 text-gray-400 text-sm">
-        No jobs yet. Create one above.
-      </div>
-    )
-  }
-
-  // Apply filter then sort entirely in memory — the full list is already cached
-  const filtered = filter === 'ALL'
-    ? jobs
-    : jobs.filter((j) => j.current_status === filter)
-
-  const sorted = [...filtered].sort((a, b) => {
-    switch (sort) {
-      case 'oldest':    return new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-      case 'name_asc':  return a.name.localeCompare(b.name)
-      case 'name_desc': return b.name.localeCompare(a.name)
-      default:          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    }
-  })
-
   return (
     <div className="space-y-3">
 
@@ -91,7 +66,7 @@ export default function JobList() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-gray-900">
           {filter !== 'ALL'
-            ? `Jobs (${filtered.length} ${STATUS_LABELS[filter as StatusType]} of ${jobs.length.toLocaleString()} loaded)`
+            ? `Jobs (${jobs.length.toLocaleString()} ${STATUS_LABELS[filter as StatusType]} of ${totalCount.toLocaleString()})`
             : `Jobs (${jobs.length.toLocaleString()} of ${totalCount.toLocaleString()})`
           }
         </h2>
@@ -127,13 +102,16 @@ export default function JobList() {
         </div>
       </div>
 
-      {/* Empty state for active filter */}
-      {sorted.length === 0 ? (
+      {/* Job list or empty states */}
+      {jobs.length === 0 ? (
         <div className="text-center py-12 text-gray-400 text-sm">
-          No jobs with status "{STATUS_LABELS[filter as StatusType]}".
+          {filter === 'ALL'
+            ? 'No jobs yet. Create one above.'
+            : `No jobs with status "${STATUS_LABELS[filter as StatusType]}".`
+          }
         </div>
       ) : (
-        sorted.map((job) => <JobCard key={job.id} job={job} />)
+        jobs.map((job) => <JobCard key={job.id} job={job} />)
       )}
 
       {/* Load More — only shown when more pages exist on the server */}

@@ -123,58 +123,58 @@ Beyond what's implemented here, a production system at Rescale's scale would add
 
 ## Prompt Engineering Writeup
 
-### Approach
-This project was built collaboratively with Claude Code (claude-sonnet-4-6) using a deliberate section-by-section methodology. The core rule was: **explain the design and alternatives before writing any code, then wait for approval before moving to the next section.** This ensured every decision was understood well enough to be explained independently — not just accepted and moved on from.
+### My Role vs. the AI's Role
 
-The workflow looked like:
-1. AI explains the design choice and what alternatives exist
-2. User approves or redirects
-3. AI writes the code for that section only
-4. Repeat
+I used Claude Code (claude-sonnet-4-6) as an implementation accelerator, not a decision-maker. The architecture, data model, technology choices, and tradeoffs were mine to own and defend. The AI's job was to implement what I approved and explain options clearly enough for me to evaluate them.
 
-This kept the build incremental and reviewable rather than generating a large codebase in one shot.
+The rule I enforced throughout: **explain the design and what alternatives exist before writing a single line of code. Wait for my approval before moving to the next section.** This kept the build incremental and meant every decision passed through my judgment first.
 
 ---
 
-### Key Prompts & Decisions
+### How the Process Actually Worked
 
-**"Set up the Django backend with DRF and PostgreSQL"**
-Before writing anything, we discussed why Django over FastAPI (maturity, built-in admin, DRF's serializer + pagination ecosystem) and why PostgreSQL over SQLite (production parity inside Docker, FK constraints, proper indexing). Only after agreeing on the rationale was the code written.
+Each section followed this loop:
 
-**"Design the data model for jobs and statuses"**
-We discussed separating `Job` and `JobStatus` into two tables (one-to-many) rather than storing status as a field on the job. The reasoning: Rescale's real platform tracks status history — a single field would lose that. This informed the `prefetch_related` optimization later.
+1. I defined the requirement or constraint ("the job list needs to handle scale — think about pagination")
+2. AI explained the design options and tradeoffs for that specific problem
+3. I evaluated the options and decided
+4. AI implemented exactly that — nothing more
+5. I reviewed the output, asked follow-up questions if anything was unclear, then moved on
 
-**"Set up the React frontend with TanStack Query"**
-We discussed `useInfiniteQuery` vs `useQuery` for the job list. `useInfiniteQuery` was chosen because it maps naturally to the paginated API response and gives a "Load More" UX without managing page state manually.
-
-**"Add filtering and sorting"**
-We made the explicit tradeoff of client-side filtering on loaded pages vs. backend filtering. The README documents this limitation honestly, and the production solution (backend query params) is also documented. The AI explained this tradeoff before implementing so the decision was conscious, not accidental.
-
-**"Write the Playwright E2E tests"**
-Prompted for tests that cover the two core user flows: the job list loads and displays jobs, and filtering by status works. Tests were written to be deterministic by seeding the database before each run.
-
-**"Write the Makefile and Docker setup"**
-We discussed the healthcheck chain — postgres must be healthy before django starts, django must be healthy before the test runner hits it. This prevented flaky tests caused by timing.
+This meant I could explain every decision independently before we built the next piece. The AI never got ahead of me.
 
 ---
 
-### Refinements Made
+### Key Decisions I Made (and Why)
 
-- Initial healthcheck used `wget --spider` — this fails silently in BusyBox (nginx:alpine). Changed to `wget -O /dev/null`.
-- `wget` wasn't installed in the nginx:alpine image at all. Added `RUN apk add --no-cache wget` to the frontend Dockerfile.
-- Playwright package version resolved to `1.58.2` but the Docker image was pinned to `1.49.0`, causing a binary mismatch. Fixed by removing the `^` caret and pinning both to `1.58.2`.
-- Django's `ALLOWED_HOSTS` didn't include `frontend` — Playwright hits the app via the Docker service name `frontend` inside the compose network. Added it.
+**Separate `Job` and `JobStatus` tables (not a status field on Job)**
+The AI presented both options. A single status field is simpler — but it destroys history. Rescale's real platform tracks the full lifecycle of a computation. I chose the two-table append-only design because history preservation was a core requirement, not an afterthought. This decision cascaded into everything else: the `prefetch_related` optimization, the correlated subquery for filtering, the composite index on `(job_id, timestamp DESC)`.
 
-Each of these was caught by running `make test` and reading the actual error output, then making a targeted fix rather than guessing.
+**Server-side filtering and sorting (not client-side)**
+The naive approach filters the already-loaded page in JavaScript. That's fine for 20 jobs but wrong at scale — if you've only loaded page 1 and filter for RUNNING, you'd miss RUNNING jobs on pages 2–10. I directed the AI to move filter and sort to the backend as query params, so results are always complete regardless of pagination state.
+
+**`useInfiniteQuery` over `useQuery`**
+The AI explained both. `useQuery` would require manually tracking page state and merging results. `useInfiniteQuery` maps directly to DRF's paginated response shape and handles page merging automatically. Clear win — I approved it immediately.
+
+**`/health/` as a separate endpoint (not reusing `/api/jobs/`)**
+Healthchecks fire every 5–10 seconds. `/api/jobs/` hits the database, runs pagination, serializes data. That's wasteful for a liveness probe. I specified a dedicated endpoint that returns `{"status": "ok"}` with no DB access — the only question Docker needs answered.
+
+**Explicit database indexes beyond Django defaults**
+Django auto-indexes primary keys and foreign keys. I asked the AI what query patterns our API would run and which columns those touched. That conversation identified three gaps: `created_at` for sort, `name` for sort, and `(job_id, timestamp DESC)` for the status subquery. I approved adding those as a separate migration so they're version-controlled.
 
 ---
 
-### What the AI Got Right
-- The N+1 query explanation and `prefetch_related` fix were correct and well-reasoned on the first pass.
-- The Docker compose healthcheck dependency chain (`depends_on: condition: service_healthy`) was set up correctly from the start.
-- The infinite scroll / pagination architecture matched TanStack Query v5's API without needing iteration.
+### Debugging — Active Reasoning, Not Guessing
 
-### What the AI Got Wrong & Fixes
-- **BusyBox wget flags** — `wget --spider` is a GNU wget flag not available in Alpine's BusyBox wget. The AI used it without flagging the Alpine incompatibility. Fixed manually after the container failed.
-- **Playwright version pinning** — the AI initially used a `^` caret on the Playwright npm package, allowing it to resolve to a newer version than the Docker image provided. This caused a runtime binary mismatch. Fixed by pinning both to the same exact version.
-- **ALLOWED_HOSTS** — the AI set `ALLOWED_HOSTS` for external browser access but missed that Playwright inside Docker accesses the app via the compose service name `frontend`, which also needs to be whitelisted.
+Each bug was caught by running `make test`, reading the actual error output, identifying the root cause, and making one targeted fix.
+
+- **`wget --spider` failing silently** — error pointed to the nginx container healthcheck. I looked up what wget variant Alpine Linux ships (BusyBox, not GNU wget) and confirmed `--spider` isn't supported. Fixed to `wget -O /dev/null`.
+- **`wget` not found at all** — same container, next layer of the problem. Alpine's nginx image doesn't include wget. Added `RUN apk add --no-cache wget` to the frontend Dockerfile.
+- **Playwright binary mismatch** — the error message explicitly said the installed package version didn't match the browser binaries. I traced it to the `^` caret in `package.json` allowing npm to resolve a newer version than the Docker image provided. Removed the caret, pinned both to `1.58.2`.
+- **Django `ALLOWED_HOSTS` rejecting requests** — Playwright runs inside Docker and hits the app via the compose service name `frontend`, not `localhost`. Added `frontend` to `ALLOWED_HOSTS`. This required understanding how Docker's internal DNS works.
+
+---
+
+### What I'd Do Differently
+
+The section-by-section approval loop worked well but added overhead on mechanical tasks like boilerplate wiring. In future projects I'd apply the strict approval gate only to architectural decisions and give the AI more autonomy on pure implementation work once the architecture is locked.
