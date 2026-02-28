@@ -32,6 +32,24 @@ make up
 
 ---
 
+## API Reference
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/jobs/` | List jobs — paginated, filterable, sortable |
+| `POST` | `/api/jobs/` | Create a job (auto-assigns PENDING status) |
+| `PATCH` | `/api/jobs/<id>/` | Update job status (inserts new JobStatus row) |
+| `DELETE` | `/api/jobs/<id>/` | Delete job and cascade-delete its status history |
+| `GET` | `/api/jobs/<id>/history/` | Full status history for a job (oldest → newest) |
+| `GET` | `/health/` | Health check — returns `{"status": "ok"}` |
+
+**Query params for `GET /api/jobs/`:**
+- `status` — filter by current status: `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`
+- `sort` — ordering: `newest` (default), `oldest`, `name_asc`, `name_desc`
+- `page` — page number (default: 1, page size: 20)
+
+---
+
 ## Performance Considerations
 
 ### N+1 Query Problem — `prefetch_related`
@@ -65,24 +83,15 @@ millions of jobs a single `GET /api/jobs/` response could be hundreds of megabyt
 
 **What we implemented:**
 - Server-side page-based pagination (`page_size = 20`) on `GET /api/jobs/`
-- The response includes `count` (total jobs in DB), `next`, `previous`, and `results`
-- The frontend uses TanStack Query's `useInfiniteQuery` to fetch pages on demand
-  and merge them into a single list — subsequent pages load only when the user
-  clicks "Load More"
-- Filter and sort operate client-side on the loaded pages
-
-**Known limitation of client-side filtering at scale:**
-Filtering by status (e.g. "Running") only searches loaded pages, not the full
-dataset. With millions of jobs and only the first page loaded, a filter for
-"Running" would miss Running jobs on unloaded pages.
-
-**Production solution:**
-Move filtering and sorting to the backend as query parameters:
-```
-GET /api/jobs/?status=RUNNING&sort=name_asc&page=1
-```
-This keeps the database doing the filtering work and ensures results are always
-complete regardless of how many pages have been loaded.
+- The response includes `count` (total matching jobs), `next`, `previous`, and `results`
+- Filtering and sorting happen on the backend via query params:
+  ```
+  GET /api/jobs/?status=RUNNING&sort=name_asc&page=1
+  ```
+  This ensures results are always complete regardless of how many pages have been loaded
+- The frontend uses TanStack Query's `useInfiniteQuery` with `filter` and `sort` in the
+  query key — changing either resets to page 1 and re-fetches from the backend
+- Subsequent pages load only when the user clicks "Load More"
 
 **On cursor-based pagination:**
 Page-number pagination still degrades at very large offsets because the database
@@ -93,10 +102,22 @@ true scale is cursor-based (keyset) pagination — using the last seen `id` or
 ### Database Indexes
 
 PostgreSQL automatically creates an index on primary keys and foreign keys.
-For the `GET /api/jobs/` query pattern, the most relevant index is on
-`jobstatus.job_id` (auto-created by the FK constraint) combined with
-`jobstatus.timestamp DESC`, which makes the "latest status per job" lookup
-fast even with a large status history.
+We additionally define explicit indexes in the model `Meta` classes:
+
+- `Job`: index on `created_at` (covers newest/oldest sort), index on `name` (covers name sort)
+- `JobStatus`: composite index on `(job_id, timestamp DESC)` — makes the correlated subquery
+  used for status filtering fast even with a large status history per job
+
+### At True Scale
+
+Beyond what's implemented here, a production system at Rescale's scale would add:
+
+- **Cursor-based pagination** — page-number pagination degrades at large offsets; keyset pagination using the last seen `id` or `created_at` as a cursor keeps every page fetch O(1)
+- **Read replicas** — dashboard list queries run against a replica, freeing the primary for writes
+- **Connection pooling** — PgBouncer in front of PostgreSQL to handle burst traffic without exhausting connection limits
+- **Redis caching** — cache frequently-read job lists with short TTLs; invalidate on status change
+- **CDN for static assets** — serve the compiled React bundle from edge nodes
+- **JobStatus partitioning** — partition the status history table by time range so old data doesn't slow down queries on recent jobs
 
 ---
 

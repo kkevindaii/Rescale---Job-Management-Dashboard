@@ -30,9 +30,11 @@ class Job(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        # Default ordering for all Job queries — newest jobs appear first
-        # in list responses without needing to specify order_by() each time
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['created_at'], name='job_created_at_idx'),
+            models.Index(fields=['name'], name='job_name_idx'),
+        ]
 
     def __str__(self):
         return self.name
@@ -77,10 +79,10 @@ class JobStatus(models.Model):
     timestamp = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        # Default ordering: newest status first.
-        # This means job.statuses.first() always returns the current status
-        # without any additional .order_by() call at the query site.
         ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['job', '-timestamp'], name='jobstatus_job_timestamp_idx'),
+        ]
 
     def __str__(self):
         return f'{self.job.name} → {self.status_type} at {self.timestamp}'

@@ -13,10 +13,16 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
+from django.db.models import OuterRef, Subquery
 
 from .models import Job, JobStatus
 from .serializers import JobSerializer, JobStatusSerializer
+
+
+def health_check(request):
+    return JsonResponse({"status": "ok"})
 
 
 class JobPagination(PageNumberPagination):
@@ -40,18 +46,56 @@ class JobViewSet(viewsets.ViewSet):
 
     def list(self, request):
         """
-        GET /api/jobs/
-        Returns all jobs ordered by creation date (newest first),
-        each including its current status derived from the latest JobStatus entry.
+        GET /api/jobs/?status=RUNNING&sort=name_asc&page=1
 
-        Performance note:
-        prefetch_related('statuses') avoids the N+1 query problem. Without it,
-        get_current_status() in the serializer would fire one DB query per job
-        to fetch its latest status. With it, Django fetches all statuses for
-        all jobs in a single second query and resolves them in Python — keeping
-        total queries at 2 regardless of how many jobs exist.
+        Optional query params:
+          status — filter by current status (PENDING, RUNNING, COMPLETED, FAILED)
+          sort   — ordering (newest, oldest, name_asc, name_desc); defaults to newest
+
+        Filtering uses a correlated subquery to find each job's current status
+        (the latest JobStatus row by timestamp) without denormalizing status onto
+        the Job table. The composite index on (job_id, -timestamp) keeps this fast.
+
+        prefetch_related('statuses') is still used so the serializer's
+        get_current_status() can resolve current_status without extra queries.
         """
-        queryset = Job.objects.prefetch_related('statuses').all()
+        # Validate status filter
+        status_filter = request.query_params.get('status')
+        if status_filter and status_filter not in JobStatus.StatusType.values:
+            return Response(
+                {'error': f'Invalid status. Must be one of: {JobStatus.StatusType.values}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validate sort
+        valid_sorts = ['newest', 'oldest', 'name_asc', 'name_desc']
+        sort = request.query_params.get('sort', 'newest')
+        if sort not in valid_sorts:
+            return Response(
+                {'error': f'Invalid sort. Must be one of: {valid_sorts}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Subquery: latest status_type for each job — used for filtering
+        latest_status = JobStatus.objects.filter(
+            job=OuterRef('pk')
+        ).order_by('-timestamp').values('status_type')[:1]
+
+        queryset = Job.objects.annotate(
+            current_status_type=Subquery(latest_status)
+        ).prefetch_related('statuses')
+
+        if status_filter:
+            queryset = queryset.filter(current_status_type=status_filter)
+
+        order_map = {
+            'newest':    '-created_at',
+            'oldest':    'created_at',
+            'name_asc':  'name',
+            'name_desc': '-name',
+        }
+        queryset = queryset.order_by(order_map[sort])
+
         paginator = JobPagination()
         page = paginator.paginate_queryset(queryset, request)
         serializer = JobSerializer(page, many=True)
