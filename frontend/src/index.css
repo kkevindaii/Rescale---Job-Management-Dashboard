@@ -1,0 +1,9 @@
+/*
+  Tailwind's three directive layers:
+  - base:       resets and default HTML element styles
+  - components: reusable component classes (none custom here)
+  - utilities:  all the utility classes (flex, p-4, text-gray-900, etc.)
+*/
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

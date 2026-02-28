@@ -1,0 +1,84 @@
+services:
+
+  # --- PostgreSQL database ---
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: rescale
+      POSTGRES_USER: rescale
+      POSTGRES_PASSWORD: rescale
+    volumes:
+      # Named volume persists data across container restarts
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready exits 0 when the server is accepting connections
+      test: ["CMD-SHELL", "pg_isready -U rescale -d rescale"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # --- Django + Gunicorn backend ---
+  backend:
+    build:
+      context: ./backend
+    environment:
+      POSTGRES_DB: rescale
+      POSTGRES_USER: rescale
+      POSTGRES_PASSWORD: rescale
+      # 'db' is the service name Docker resolves to the database container's IP
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      DEBUG: "True"
+      DJANGO_SECRET_KEY: dev-secret-key-not-for-production
+      ALLOWED_HOSTS: "localhost,127.0.0.1,backend,frontend"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        # Backend won't start until the database is accepting connections
+        condition: service_healthy
+    healthcheck:
+      # Hit the jobs list endpoint — if it returns 200 the app is ready
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/jobs/')\" 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # Give the entrypoint time to run migrations before health checks begin
+      start_period: 30s
+
+  # --- React + nginx frontend ---
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        # Frontend nginx won't start until the backend API is responding
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # --- Playwright E2E tests ---
+  # This service is only started explicitly via `make test` or `docker compose run tests`.
+  # `make up` starts only db, backend, and frontend — not this service.
+  tests:
+    build:
+      context: ./tests
+    environment:
+      # Base URL the Playwright tests navigate to — resolves via Docker's
+      # internal DNS to the frontend container
+      BASE_URL: "http://frontend"
+    depends_on:
+      frontend:
+        # Tests don't start until the full stack (db → backend → frontend)
+        # has passed health checks — no sleeps or polling needed
+        condition: service_healthy
+
+volumes:
+  postgres_data:
